@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Patient Portal</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 20px;
+        background-color: #f0f4f8;
+      }
+      .container {
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+        gap: 5px;
+      }
+      .card {
+        background: white;
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      }
+      .value {
+        font-size: 24px;
+        font-weight: bold;
+        color: #2c5282;
+      }
+      .label {
+        color: #4a5568;
+        font-size: 14px;
+      }
+      canvas {
+        width: 100% !important;
+        height: 210px !important;
+      }
+      .beat {
+        animation: beat 0.2s ease-out;
+      }
+      @keyframes beat {
+        0% {
+          transform: scale(1.02);
+          color: red;
+        }
+        50% {
+          transform: scale(1.01);
+          color: palevioletred;
+        }
+        100% {
+          transform: scale(1);
+          color: #2c5282;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Patient Vital Signs Monitor</h1>
+      <div class="grid">
+        <div class="card">
+          <div class="label">Temperature</div>
+          <div id="temp" class="value">-- C</div>
+        </div>
+        <div class="card">
+          <div class="label">ECG Heart Rate</div>
+          <div id="hr_ecg" class="value">-- BPM</div>
+        </div>
+        <div class="card">
+          <div class="label">PPG Heart Rate</div>
+          <div id="hr_ppg" class="value">-- BPM</div>
+        </div>
+        <div class="card">
+          <div class="label">SpO2</div>
+          <div id="spo2" class="value">-- %</div>
+        </div>
+      </div>
+
+      <div class="grid" style="margin-top: 20px">
+        <div class="card">
+          <h3>ECG Signal</h3>
+          <canvas id="ecgChart"></canvas>
+        </div>
+        <div class="card">
+          <h3>PPG Signal</h3>
+          <canvas id="ppgChart"></canvas>
+        </div>
+      </div>
+
+      <div class="grid" style="margin-top: 20px">
+        <div class="card">
+          <h3>Poincare Plot</h3>
+          <canvas id="poincarePlot"></canvas>
+        </div>
+        <div class="card">
+          <h3>HRV Metrics</h3>
+          <div style="margin: 10px 0">
+            <div class="label">Mean RR</div>
+            <div id="meanRR" class="value">--- ms</div>
+          </div>
+          <div style="margin: 10px 0">
+            <div class="label">SDNN</div>
+            <div id="sdnn" class="value">--- ms</div>
+          </div>
+          <div style="margin: 10px 0">
+            <div class="label">RMSSD</div>
+            <div id="rmssd" class="value">--- ms</div>
+          </div>
+          <div style="margin: 10px 0">
+            <div class="label">pNN50</div>
+            <div id="pnn50" class="value">---%</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script src="chart.min.js"></script>
+    <script>
+      //const ws = new WebSocket(`ws://${window.location.hostname}:81`);
+      // const ws = new WebSocket(`ws://patientportal.local:81`);
+      const maxDataPoints = 200;
+      let ecgData = Array(maxDataPoints).fill(0);
+      let ppgData = Array(maxDataPoints).fill(0);
+      let rrIntervals = [];
+
+      // Initialize charts
+      const ecgChart = new Chart(document.getElementById("ecgChart"), {
+        type: "line",
+        data: {
+          labels: Array(maxDataPoints).fill(""),
+          datasets: [
+            {
+              label: "ECG",
+              data: ecgData,
+              borderColor: "#aa0000",
+              borderWidth: 2,
+              fill: false,
+              tension: 0.5,
+            },
+          ],
+        },
+        options: {
+          radius: 0,
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          scales: {
+            y: { suggestedMin: -100, suggestedMax: 100 },
+          },
+          plugins: { legend: { display: false } },
+        },
+      });
+
+      const ppgChart = new Chart(document.getElementById("ppgChart"), {
+        type: "line",
+        data: {
+          labels: Array(maxDataPoints).fill(""),
+          datasets: [
+            {
+              label: "PPG",
+              data: ppgData,
+              borderColor: "#00aaaa",
+              borderWidth: 2,
+              fill: false,
+              tension: 0.8,
+            },
+          ],
+        },
+        options: {
+          radius: 0,
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          scales: {
+            y: { suggestedMin: -100, suggestedMax: 100 },
+          },
+          plugins: { legend: { display: false } },
+        },
+      });
+
+      const poincareChart = new Chart(document.getElementById("poincarePlot"), {
+        type: "scatter",
+        data: {
+          datasets: [
+            {
+              label: "RR Intervals",
+              data: [],
+              backgroundColor: "#4299e1",
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: true,
+          scales: {
+            x: {
+              title: { display: true, text: "RR(n) [ms]" },
+            },
+            y: {
+              title: { display: true, text: "RR(n+1) [ms]" },
+            },
+          },
+        },
+      });
+      let source;
+      let reconnectTimeout = 2000; // Initial reconnect delay (1 second)
+      let lastEventTime = Date.now(); // Track the time of the last received event
+
+      function initializeEventSource() {
+        if (source) {
+          source.close(); // Close existing connection before creating a new one
+        }
+
+        source = new EventSource("http://patientportal.local/sensor_readings");
+
+        source.addEventListener("open", function () {
+          console.log("Events Connected");
+          reconnectTimeout = 2000; // Reset reconnect delay on successful connection
+        });
+
+        source.addEventListener("close", function () {
+          console.log("Events Closed");
+          attemptReconnect();
+        });
+
+        source.addEventListener("error", function (e) {
+          if (e.target.readyState !== EventSource.OPEN) {
+            console.log("Events Disconnected");
+            attemptReconnect();
+          }
+        });
+        let ecgNeedsUpdate = false;
+        let ppgNeedsUpdate = false;
+        // Batch update logic
+        setInterval(() => {
+          if (ecgNeedsUpdate) {
+            ecgChart.update("none");
+            ecgNeedsUpdate = false;
+          }
+          if (ppgNeedsUpdate) {
+            ppgChart.update("none");
+            ppgNeedsUpdate = false;
+          }
+        }, 17); // Update charts every 100ms
+
+        source.addEventListener("readings", function (event) {
+          try {
+            lastEventTime = Date.now(); // Update the time of the last received event
+
+            const data = JSON.parse(event.data);
+            if (!data.ppgIdle) {
+              document.getElementById("hr_ppg").textContent =
+                data.ppgHR + " BPM";
+              document.getElementById("spo2").textContent = data.spo2 + " %";
+              ppgData.push(data.ppg);
+              if (ppgData.length > maxDataPoints) ppgData.shift();
+              ppgChart.data.datasets[0].data = ppgData;
+              ppgNeedsUpdate = true;
+              if (data.ppgBeat) {
+                document.getElementById("hr_ppg").classList.add("beat");
+                setTimeout(() => {
+                  document.getElementById("hr_ppg").classList.remove("beat");
+                }, 250);
+              }
+            } else {
+              document.getElementById("hr_ppg").textContent = "--- BPM";
+              document.getElementById("spo2").textContent = "--- %";
+            }
+
+            if (!data.ecgIdle) {
+              document.getElementById("hr_ecg").textContent = data.hr + " BPM";
+              // Update HRV metrics
+              document.getElementById("meanRR").textContent =
+                data.meanRR + " ms";
+              document.getElementById("sdnn").textContent = data.sdnn + " ms";
+              document.getElementById("rmssd").textContent = data.rmssd + " ms";
+              document.getElementById("pnn50").textContent = data.pnn50 + " %";
+
+              // Update ECG and PPG signals
+              if (data.ecg < 100 && data.ecg > -100) {
+                ecgData.push(data.ecg);
+                if (ecgData.length > maxDataPoints) ecgData.shift();
+                ecgChart.data.datasets[0].data = ecgData;
+                ecgNeedsUpdate = true;
+              }
+
+              // Update Poincare plot
+              if (data.ecgBeat) {
+                document.getElementById("hr_ecg").classList.add("beat");
+                setTimeout(() => {
+                  document.getElementById("hr_ecg").classList.remove("beat");
+                }, 250);
+                const lastRR = data.meanRR;
+                if (rrIntervals.length > 0) {
+                  poincareChart.data.datasets[0].data.push({
+                    x: rrIntervals[rrIntervals.length - 1],
+                    y: lastRR,
+                  });
+                  if (poincareChart.data.datasets[0].data.length > 50) {
+                    poincareChart.data.datasets[0].data.shift();
+                  }
+                  poincareChart.update("none");
+                }
+                rrIntervals.push(lastRR);
+                if (rrIntervals.length > 50) rrIntervals.shift();
+
+                // Visual feedback for beats
+              }
+            } else {
+              document.getElementById("hr_ecg").textContent = "--- BPM";
+              // Update HRV metrics
+              document.getElementById("meanRR").textContent = "--- ms";
+              document.getElementById("sdnn").textContent = "--- ms";
+              document.getElementById("rmssd").textContent = "--- ms";
+              document.getElementById("pnn50").textContent = "--- %";
+            }
+            document.getElementById("temp").textContent = data.temp + " C";
+          } catch (err) {
+            console.error("Error processing event data:", err);
+          }
+        });
+
+        // Periodic check for inactivity
+        setInterval(() => {
+          if (Date.now() - lastEventTime > 2000) {
+            // If no events for 5 seconds
+            console.warn("No events received for 5 seconds. Reinitializing...");
+            location.reload();
+          }
+        }, 1000);
+      }
+
+      function attemptReconnect() {
+        source.close();
+        setTimeout(() => {
+          initializeEventSource();
+        }, reconnectTimeout);
+        // reconnectTimeout = Math.min(reconnectTimeout * 2, 60000); // Exponential backoff up to 1 minute
+      }
+
+      // Initialize the EventSource connection
+      initializeEventSource();
+    </script>
+  </body>
+</html>
